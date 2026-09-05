@@ -10,6 +10,69 @@
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script type="module">
+  /* ---------- Firebase (Firestore) — shared cloud database ----------
+     Fill in YOUR project's config below (Firebase console → Project settings →
+     "Your apps" → SDK setup and configuration → Config). Every card check-in
+     ("card:S-001", etc.) is stored as a document in the "kv" collection, one
+     document per key, so all devices (every staff phone) read/write the same
+     live database. If apiKey is left as the placeholder, or Firebase fails to
+     load (offline, ad-blocker, wrong config), the app automatically falls
+     back to window.storage (when running as a Claude Artifact) or to this
+     browser's localStorage (single device only) — see storageGet/Set below. */
+ 
+  const firebaseConfig = {
+  apiKey: "AIzaSyDF-WW1YGzKpRQOynG_R6iDlrSpIdG3UXk",
+  authDomain: "dinerucao-2026.firebaseapp.com",
+  projectId: "dinerucao-2026",
+  storageBucket: "dinerucao-2026.firebasestorage.app",
+  messagingSenderId: "102765390283",
+  appId: "1:102765390283:web:cc3e3ec8c8ac10728eee4e"
+};
+
+
+  window.__firebaseReady = (async () => {
+    if(!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('VOTRE_')){
+      console.info('Firebase non configuré — utilisation du stockage de secours.');
+      window.__firebase = { ready:false };
+      return false;
+    }
+    try{
+      const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js');
+      const { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs } =
+        await import('https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js');
+
+      const app = initializeApp(firebaseConfig);
+      const db = getFirestore(app);
+
+      window.__firebase = {
+        ready: true,
+        async get(key){
+          const snap = await getDoc(doc(db, 'kv', key));
+          return snap.exists() ? snap.data().value : null;
+        },
+        async set(key, value){
+          await setDoc(doc(db, 'kv', key), { value, updated_at: Date.now() });
+        },
+        async delete(key){
+          await deleteDoc(doc(db, 'kv', key));
+        },
+        async listByPrefix(prefix){
+          const snap = await getDocs(collection(db, 'kv'));
+          const keys = [];
+          snap.forEach(d => { if(d.id.startsWith(prefix)) keys.push(d.id); });
+          return keys;
+        }
+      };
+      console.info('Firebase connecté — base de données partagée active.');
+      return true;
+    }catch(e){
+      console.warn('Connexion Firebase impossible, utilisation du stockage de secours.', e);
+      window.__firebase = { ready:false };
+      return false;
+    }
+  })();
+</script>
 <style>
   :root{
     --bg-deep:#241531;
@@ -275,6 +338,7 @@
   <header class="top">
     <div class="eyebrow">Contrôle d'accès</div>
     <h1>Carte de <span>Dîner</span></h1>
+    <div id="backend-status" style="margin-top:8px;font-size:11px;color:var(--cream-dim);"></div>
   </header>
 
   <nav class="tabs">
@@ -435,14 +499,41 @@ document.querySelectorAll('.tab-btn').forEach(btn=>{
 });
 
 /* ---------- Storage layer ----------
-   Uses window.storage (shared, cross-device) when available — i.e. when opened
-   as a Claude Artifact. Falls back to the browser's localStorage when this file
-   is opened directly (e.g. saved and double-tapped on a phone), so the app still
-   works standalone — but then data stays on that one device/browser only, and
-   isn't shared with other gate-staff phones. */
+   Priority order: 1) Firebase Firestore (shared, cross-device, works on
+   GitHub Pages or any host — configure it in the <script type="module"> at
+   the top of this file) 2) window.storage (shared, cross-device — only
+   present when this file runs as a Claude Artifact) 3) the browser's
+   localStorage (works everywhere but stays on that one device only).
+   Every function below (getCard, saveCard, listAllCards, etc.) is unchanged
+   — they just call storageGet/Set/Delete/ListKeys, so the rest of the app
+   doesn't need to know which backend is actually active. */
 const hasCloudStorage = !!(window.storage && typeof window.storage.get === 'function');
 
+async function useFirebase(){
+  if(window.__firebaseReady) await window.__firebaseReady;
+  return !!(window.__firebase && window.__firebase.ready);
+}
+
+(async function showBackendStatus(){
+  const el = document.getElementById('backend-status');
+  if(!el) return;
+  const fb = await useFirebase();
+  if(fb){
+    el.textContent = '🟢 Base de données Firebase connectée — partagée entre tous les téléphones';
+  }else if(hasCloudStorage){
+    el.textContent = '🟡 Stockage Claude (partagé dans cette session d\'artifact)';
+  }else{
+    el.textContent = '🔴 Stockage local uniquement — non partagé entre appareils (configurez Firebase)';
+  }
+})();
+
 async function storageGet(key){
+  if(await useFirebase()){
+    try{
+      const value = await window.__firebase.get(key);
+      return value !== null ? {key, value} : null;
+    }catch(e){ console.warn('Firebase get error, falling back', e); }
+  }
   if(hasCloudStorage){
     try{ return await window.storage.get(key, true); }catch(e){ return null; }
   }
@@ -452,18 +543,27 @@ async function storageGet(key){
   }catch(e){ return null; }
 }
 async function storageSet(key, value){
+  if(await useFirebase()){
+    try{ await window.__firebase.set(key, value); return {key, value}; }catch(e){ console.warn('Firebase set error, falling back', e); }
+  }
   if(hasCloudStorage){
     try{ return await window.storage.set(key, value, true); }catch(e){ return null; }
   }
   try{ localStorage.setItem('gala:'+key, value); return {key, value}; }catch(e){ return null; }
 }
 async function storageDelete(key){
+  if(await useFirebase()){
+    try{ await window.__firebase.delete(key); return {key, deleted:true}; }catch(e){ console.warn('Firebase delete error, falling back', e); }
+  }
   if(hasCloudStorage){
     try{ return await window.storage.delete(key, true); }catch(e){ return null; }
   }
   try{ localStorage.removeItem('gala:'+key); return {key, deleted:true}; }catch(e){ return null; }
 }
 async function storageListKeys(prefix){
+  if(await useFirebase()){
+    try{ return await window.__firebase.listByPrefix(prefix); }catch(e){ console.warn('Firebase list error, falling back', e); }
+  }
   if(hasCloudStorage){
     try{
       const r = await window.storage.list(prefix, true);
