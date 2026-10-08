@@ -1,0 +1,1272 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Contrôle d'accès — Carte de Dîner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script type="module">
+  /* ---------- Firebase (Firestore) — shared cloud database ----------
+     Talks to Firestore through its REST API (plain fetch), so NO Firebase SDK
+     has to be downloaded from a CDN — fewer things that can be blocked by an
+     extension, a firewall or a slow connection. Every record ("card:S-001",
+     "meta:seed_v2", ...) is one document in the "kv" collection, so all devices
+     (every staff phone) read/write the same live database.
+     If Firebase cannot be reached, the app falls back to window.storage (when
+     run as a Claude Artifact) or to this browser's localStorage (single device
+     only); the badge under the title says which one is active and why. */
+  const firebaseConfig = {
+    apiKey: "AIzaSyDF-WW1YGzKpRQOynG_R6iDlrSpIdG3UXk",
+    authDomain: "dinerucao-2026.firebaseapp.com",
+    projectId: "dinerucao-2026",
+    storageBucket: "dinerucao-2026.firebasestorage.app",
+    messagingSenderId: "102765390283",
+    appId: "1:102765390283:web:cc3e3ec8c8ac10728eee4e"
+  };
+
+  window.__firebaseError = '';
+  window.__firebaseReady = (async () => {
+    if(!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('VOTRE_')){
+      window.__firebaseError = 'config Firebase non renseignée';
+      window.__firebase = { ready:false };
+      return false;
+    }
+    const root = 'https://firestore.googleapis.com/v1/projects/' +
+      encodeURIComponent(firebaseConfig.projectId) + '/databases/(default)/documents/kv';
+    const keyQ = 'key=' + encodeURIComponent(firebaseConfig.apiKey);
+    const docUrl = id => root + '/' + encodeURIComponent(id) + '?' + keyQ;
+
+    async function call(url, opts){
+      const res = await fetch(url, opts);
+      let data = null;
+      try{ data = await res.json(); }catch(e){}
+      return { res, data };
+    }
+    function fail(res, data){
+      const msg = (data && data.error && data.error.message) ? data.error.message : ('HTTP ' + res.status);
+      const err = new Error(msg); err.status = res.status; return err;
+    }
+    const strVal = d => (d && d.fields && d.fields.value && typeof d.fields.value.stringValue === 'string')
+      ? d.fields.value.stringValue : null;
+
+    const api = {
+      ready: true,
+      async get(key){
+        const { res, data } = await call(docUrl(key));
+        if(res.status === 404) return null;
+        if(!res.ok) throw fail(res, data);
+        return strVal(data);
+      },
+      async set(key, value){
+        const { res, data } = await call(docUrl(key), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: {
+            value: { stringValue: value },
+            updated_at: { integerValue: String(Date.now()) }
+          }})
+        });
+        if(!res.ok) throw fail(res, data);
+      },
+      async delete(key){
+        const { res, data } = await call(docUrl(key), { method: 'DELETE' });
+        if(!res.ok && res.status !== 404) throw fail(res, data);
+      },
+      /* All documents whose id starts with prefix, as [{key, value}], in one pass. */
+      async listAll(prefix){
+        const out = []; let token = '';
+        do{
+          const url = root + '?pageSize=300&' + keyQ + (token ? '&pageToken=' + encodeURIComponent(token) : '');
+          const { res, data } = await call(url);
+          if(!res.ok) throw fail(res, data);
+          (data.documents || []).forEach(d => {
+            let id = (d.name || '').split('/documents/kv/')[1] || '';
+            try{ id = decodeURIComponent(id); }catch(e){}
+            if(id.startsWith(prefix)) out.push({ key: id, value: strVal(d) });
+          });
+          token = data.nextPageToken || '';
+        }while(token);
+        return out;
+      },
+      async listByPrefix(prefix){ return (await api.listAll(prefix)).map(e => e.key); }
+    };
+
+    /* Connectivity + permissions check: a missing document (404) is fine. */
+    try{
+      const { res, data } = await call(docUrl('_ping'));
+      const msg = (data && data.error && data.error.message) || '';
+      const dbMissing = res.status === 404 && /database|has not been used/i.test(msg) && /exist|not been used/i.test(msg);
+      if(!(res.ok || res.status === 404) || dbMissing) throw fail(res, data);
+      window.__firebase = api;
+      console.info('Firebase (Firestore REST) connecté.');
+      return true;
+    }catch(e){
+      window.__firebaseError = (e && e.status)
+        ? ('Firestore a répondu : ' + e.message)
+        : 'impossible de joindre firestore.googleapis.com (réseau, pare-feu ou extension)';
+      console.warn('Firebase indisponible :', window.__firebaseError, e);
+      window.__firebase = { ready:false };
+      return false;
+    }
+  })();
+</script>
+<style>
+  :root{
+    --bg-deep:#241531;
+    --bg-panel:#2F1D40;
+    --bg-panel-2:#3B2551;
+    --line:#5A3E73;
+    --gold:#D4AF37;
+    --gold-soft:#E8CB74;
+    --platinum:#E7DFF2;
+    --cream:#FBF8FF;
+    --cream-dim:#C9B8DC;
+    --green:#4FAE7E;
+    --green-dim:#173B2C;
+    --amber:#E0A93A;
+    --amber-dim:#3E2E10;
+    --red:#DD6B5C;
+    --red-dim:#3E1F1A;
+    --vip:#E07FAE;
+    --violet:#9B6BC9;
+    --radius:14px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background: var(--bg-deep);
+    background-image:
+      radial-gradient(circle at 12% 0%, rgba(212,175,55,0.12), transparent 42%),
+      radial-gradient(circle at 92% 8%, rgba(155,107,201,0.20), transparent 40%),
+      radial-gradient(circle at 15% 85%, rgba(224,127,174,0.10), transparent 45%),
+      radial-gradient(circle at 90% 100%, rgba(212,175,55,0.08), transparent 40%);
+    color: var(--cream);
+    font-family: 'Manrope', sans-serif;
+    min-height: 100vh;
+    padding: 0 0 60px;
+  }
+  .wrap{max-width:640px;margin:0 auto;padding:28px 18px 0;}
+  header.top{text-align:center;margin-bottom:22px;}
+  header.top .eyebrow{
+    font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--gold-soft);
+    font-weight:700;margin-bottom:6px;
+  }
+  header.top h1{
+    font-family:'Fraunces',serif;font-weight:600;font-size:26px;margin:0;
+    letter-spacing:.01em;
+  }
+  header.top h1 span{color:var(--gold);}
+
+  nav.tabs{
+    display:flex;gap:6px;background:var(--bg-panel);border:1px solid var(--line);
+    border-radius:999px;padding:4px;margin-bottom:22px;
+  }
+  nav.tabs button{
+    flex:1;border:none;background:transparent;color:var(--cream-dim);
+    font-family:'Manrope',sans-serif;font-weight:700;font-size:13px;
+    padding:10px 6px;border-radius:999px;cursor:pointer;transition:.15s;
+  }
+  nav.tabs button.active{background-image:linear-gradient(135deg, #F1DE9E, var(--gold) 60%, #B8862A);color:#241B04;}
+
+  .panel{display:none;}
+  .panel.active{display:block;animation:fade .25s ease;}
+  @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+
+  .card{
+    background:var(--bg-panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:18px;margin-bottom:16px;
+  }
+  .card h3{
+    font-family:'Fraunces',serif;font-weight:600;font-size:16px;margin:0 0 12px;
+    color:var(--cream);
+  }
+  .muted{color:var(--cream-dim);font-size:13px;line-height:1.5;}
+
+  /* Scanner */
+  #video-box{
+    position:relative;width:100%;aspect-ratio:1/1;background:#170D22;
+    border-radius:var(--radius);overflow:hidden;border:1px solid var(--line);
+    display:flex;align-items:center;justify-content:center;
+  }
+  #video-box video{width:100%;height:100%;object-fit:cover;}
+  .scan-frame{
+    position:absolute;inset:12%;border:2px solid var(--gold);border-radius:16px;
+    box-shadow:0 0 0 2000px rgba(0,0,0,.35);pointer-events:none;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  .scan-frame.flash{
+    border-color:var(--green);
+    box-shadow:0 0 0 2000px rgba(0,0,0,.35), 0 0 0 6px rgba(90,200,120,.55), 0 0 24px 8px rgba(90,200,120,.5);
+    animation:scanFlashPulse .45s ease-out;
+  }
+  @keyframes scanFlashPulse{
+    0%{ transform:scale(1); }
+    30%{ transform:scale(1.03); }
+    100%{ transform:scale(1); }
+  }
+  .scan-frame .scan-check{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    opacity:0;font-size:48px;color:var(--green);
+  }
+  .scan-frame.flash .scan-check{
+    animation:scanCheckPop .45s ease-out;
+  }
+  @keyframes scanCheckPop{
+    0%{ opacity:0; transform:scale(.5); }
+    35%{ opacity:1; transform:scale(1.15); }
+    70%{ opacity:1; transform:scale(1); }
+    100%{ opacity:0; transform:scale(1); }
+  }
+  .scan-hint{position:absolute;bottom:10px;left:0;right:0;text-align:center;font-size:12px;color:var(--gold-soft);}
+
+  .btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:8px;
+    border:none;border-radius:10px;font-family:'Manrope',sans-serif;font-weight:700;
+    font-size:14px;padding:13px 18px;cursor:pointer;width:100%;transition:filter .12s, transform .1s;
+    background-size:160% 160%;background-position:0% 50%;
+  }
+  .btn:active{transform:scale(.97);filter:brightness(.82) saturate(1.15);background-position:100% 50%;}
+  .btn-gold{background-image:linear-gradient(135deg, #F1DE9E 0%, var(--gold) 45%, #B8862A 100%);color:#241B04;}
+  .btn-green{background-image:linear-gradient(135deg, #8FE0B8 0%, var(--green) 45%, #2E7C57 100%);color:#0B2418;}
+  .btn-ghost{background-image:linear-gradient(135deg, var(--bg-panel-2), #2A1A3A);color:var(--cream);border:1px solid var(--line);}
+  .btn-outline{background:transparent;color:var(--gold-soft);border:1px solid var(--gold);}
+  .btn-danger{background:transparent;color:var(--red);border:1px solid var(--red);}
+  .btn-danger:active{background-image:linear-gradient(135deg, var(--red-dim), #5A2A22);filter:brightness(1.1);}
+  .btn-outline:active{background-image:linear-gradient(135deg, var(--amber-dim), #4A3210);filter:brightness(1.1);}
+  .btn-sm{padding:9px 12px;font-size:13px;}
+  .btn:disabled{opacity:.45;cursor:not-allowed;}
+
+  .row{display:flex;gap:10px;}
+  .row > *{flex:1;}
+
+  input[type=text], select{
+    width:100%;background:var(--bg-panel-2);border:1px solid var(--line);color:var(--cream);
+    border-radius:10px;padding:12px 14px;font-family:'Manrope',sans-serif;font-size:14px;
+  }
+  input[type=text]:focus, select:focus{outline:2px solid var(--gold);outline-offset:1px;}
+  label.field-label{font-size:12px;color:var(--cream-dim);font-weight:700;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px;}
+
+  /* Résultat ticket */
+  .ticket{
+    position:relative;border-radius:16px;padding:22px 20px 20px;margin-top:16px;
+    background:var(--bg-panel);border:1px solid var(--line);overflow:hidden;
+  }
+  .ticket.tier-5000{border-color:#8C7AA6;}
+  .ticket.tier-10000{border-color:var(--gold);}
+  .ticket.tier-vip{border-color:var(--vip);}
+  .ticket::before{
+    content:"";position:absolute;top:0;bottom:0;left:64px;width:0;
+    border-left:2px dashed rgba(255,255,255,.14);
+  }
+  .ticket-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:14px;}
+  .ticket-code{font-size:11px;letter-spacing:.08em;color:var(--cream-dim);font-weight:700;}
+  .badge{display:inline-block;padding:5px 11px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;}
+  .badge-paid{background:var(--green-dim);color:var(--green);}
+  .badge-unpaid{background:var(--red-dim);color:var(--red);}
+  .badge-entered{background:var(--gold);color:#241B04;}
+
+  .amount{
+    font-family:'Fraunces',serif;font-weight:700;font-size:40px;line-height:1;
+    margin:2px 0 4px;
+  }
+  .tier-5000 .amount{color:var(--platinum);}
+  .tier-10000 .amount{color:var(--gold);}
+  .tier-vip .amount{color:var(--vip);}
+  .amount-label{font-size:12px;color:var(--cream-dim);margin-bottom:16px;}
+
+  .status-line{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--cream-dim);margin-bottom:4px;}
+  .status-line strong{color:var(--cream);}
+
+  .stamp{
+    position:absolute;right:16px;bottom:14px;width:78px;height:78px;border-radius:50%;
+    border:3px solid var(--green);color:var(--green);display:flex;align-items:center;justify-content:center;
+    text-align:center;font-family:'Fraunces',serif;font-weight:700;font-size:12px;line-height:1.15;
+    transform:rotate(-16deg) scale(1);opacity:1;letter-spacing:.03em;
+    animation: stamp-in .35s cubic-bezier(.2,1.4,.4,1);
+  }
+  @keyframes stamp-in{from{transform:rotate(-16deg) scale(2.2);opacity:0}to{transform:rotate(-16deg) scale(1);opacity:1}}
+
+  .ticket-actions{margin-top:16px;display:flex;flex-direction:column;gap:10px;}
+
+  .empty-state{text-align:center;padding:34px 10px;color:var(--cream-dim);}
+  .empty-state i{font-size:30px;display:block;margin-bottom:10px;color:var(--gold-soft);}
+
+  /* Gestion */
+  .tier-choice{display:flex;gap:10px;margin-bottom:14px;}
+  .tier-opt{
+    flex:1;border:1px solid var(--line);background:var(--bg-panel-2);border-radius:10px;
+    padding:12px;text-align:center;cursor:pointer;
+  }
+  .tier-opt.selected{border-color:var(--gold);background:rgba(212,175,55,.1);}
+  .tier-opt .t-amount{font-family:'Fraunces',serif;font-weight:700;font-size:18px;}
+  .tier-opt .t-label{font-size:11px;color:var(--cream-dim);text-transform:uppercase;letter-spacing:.05em;}
+
+  .new-card-result{text-align:center;margin-top:14px;}
+  #qr-target{display:inline-block;background:#fff;padding:12px;border-radius:10px;margin:10px 0;}
+  #qr-target img, #qr-target canvas{display:block;}
+
+  .list-item{
+    display:flex;justify-content:space-between;align-items:center;gap:10px;
+    padding:12px 0;border-bottom:1px solid var(--line);font-size:13px;
+  }
+  .list-item:last-child{border-bottom:none;}
+  .li-left{display:flex;flex-direction:column;gap:3px;}
+  .li-code{font-weight:700;font-size:13px;}
+  .li-meta{color:var(--cream-dim);font-size:12px;}
+  .li-badges{display:flex;gap:6px;flex-shrink:0;}
+  .dot-badge{width:8px;height:8px;border-radius:50%;}
+  .search-box{margin-bottom:14px;}
+
+  /* Stats */
+  .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .stat-box{background:var(--bg-panel-2);border-radius:12px;padding:16px;}
+  .stat-box .val{font-family:'Fraunces',serif;font-size:26px;font-weight:700;color:var(--gold);}
+  .stat-box .lab{font-size:11px;color:var(--cream-dim);text-transform:uppercase;letter-spacing:.05em;margin-top:2px;}
+
+  .toast{
+    position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+    background:var(--bg-panel-2);border:1px solid var(--gold);color:var(--cream);
+    padding:11px 20px;border-radius:999px;font-size:13px;font-weight:700;
+    box-shadow:0 6px 24px rgba(0,0,0,.4);z-index:50;opacity:0;pointer-events:none;
+    transition:opacity .2s, bottom .2s;
+  }
+  .toast.show{opacity:1;bottom:34px;}
+
+  .divider-label{font-size:11px;color:var(--cream-dim);text-transform:uppercase;letter-spacing:.08em;text-align:center;margin:16px 0 10px;}
+
+  a.silent{color:inherit;text-decoration:none;}
+  ::selection{background:var(--gold);color:#241B04;}
+
+  #seed-status{font-size:12px;color:var(--cream-dim);margin-top:10px;min-height:16px;}
+  #print-header{display:none;}
+
+  .app-footer{
+    text-align:center;padding:30px 18px 6px;font-size:12px;color:var(--cream-dim);
+  }
+  .app-footer .brand{color:#4FA3E8;font-weight:700;letter-spacing:.03em;font-size:13px;}
+  .app-footer .brand strong{color:#4FA3E8;}
+  .app-footer .tel{margin-top:4px;color:#4FA3E8;}
+
+  @media print{
+    body.printing{background:#fff;color:#000;}
+    body.printing .wrap{max-width:100%;padding:0;}
+    body.printing header.top, body.printing nav.tabs, body.printing .toast,
+    body.printing .app-footer,
+    body.printing #panel-scan, body.printing #panel-gestion, body.printing #btn-print-stats{
+      display:none !important;
+    }
+    body.printing #panel-stats{display:block !important;}
+    body.printing #print-header{
+      display:block;margin-bottom:18px;border-bottom:2px solid #000;padding-bottom:10px;
+    }
+    body.printing #print-header h2{font-family:'Fraunces',serif;margin:0 0 4px;font-size:20px;}
+    body.printing #print-header div{font-size:12px;color:#444;}
+    body.printing .card{border:1px solid #ccc;background:#fff;box-shadow:none;break-inside:avoid;}
+    body.printing .stat-box{background:#f5f5f5;border:1px solid #ddd;}
+    body.printing .stat-box .val, body.printing .li-code{color:#000;}
+    body.printing .li-meta{color:#333;}
+    body.printing .list-item{border-bottom:1px solid #ddd;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div class="eyebrow">Contrôle d'accès</div>
+    <h1>Carte de <span>Dîner</span></h1>
+    <div id="backend-status" style="margin-top:8px;font-size:11px;color:var(--cream-dim);"></div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="scan">Scanner</button>
+    <button class="tab-btn" data-tab="gestion">Gestion</button>
+    <button class="tab-btn" data-tab="stats">Statistiques</button>
+  </nav>
+
+  <!-- SCANNER -->
+  <section class="panel active" id="panel-scan">
+    <div class="card">
+      <h3>Scanner une carte</h3>
+      <div id="video-box">
+        <div class="muted" id="video-placeholder">Caméra désactivée</div>
+      </div>
+      <div class="scan-hint" id="scan-hint" style="display:none;"></div>
+      <div class="row" style="margin-top:12px;">
+        <button class="btn btn-gold" id="btn-camera">Activer la caméra</button>
+        <label class="btn btn-ghost" style="margin:0;">
+          Importer une image
+          <input type="file" accept="image/*" id="file-input" style="display:none;">
+        </label>
+      </div>
+      <button class="btn btn-ghost" id="btn-switch-camera" style="display:none;margin-top:10px;">Changer de caméra</button>
+
+      <div class="divider-label">ou saisir le code manuellement</div>
+      <div class="row">
+        <input type="text" id="manual-code" placeholder="Ex. GALA-4F82K1">
+        <button class="btn btn-outline" style="flex:0 0 110px;" id="btn-manual">Vérifier</button>
+      </div>
+    </div>
+
+    <div id="result-zone"></div>
+  </section>
+
+  <!-- GESTION -->
+  <section class="panel" id="panel-gestion">
+    <div class="card">
+      <h3>Cartes imprimées</h3>
+      <div class="muted">Enregistre dans l'application les codes QR déjà imprimés sur les cartes (S-001 à S-250, VIP-001 à VIP-100), pour qu'ils soient reconnus dès le premier scan.</div>
+      <button class="btn btn-outline" id="btn-seed" style="margin-top:14px;">Importer / vérifier les cartes imprimées</button>
+      <div id="seed-status"></div>
+    </div>
+
+    <div class="card">
+      <h3>Importer un fichier Excel</h3>
+      <div class="muted">Importez le fichier .xlsx des codes QR par catégorie (colonnes Code / Catégorie / Montant) pour les enregistrer directement dans l'application — pratique pour un autre lot de cartes imprimées.</div>
+      <label class="btn btn-ghost" style="margin-top:14px;">
+        Choisir un fichier Excel (.xlsx)
+        <input type="file" accept=".xlsx,.xls" id="excel-input" style="display:none;">
+      </label>
+      <div id="excel-status"></div>
+    </div>
+
+    <div class="card">
+      <h3>Créer une carte supplémentaire</h3>
+      <label class="field-label">Catégorie</label>
+      <div class="tier-choice">
+        <div class="tier-opt selected" data-cat="S">
+          <div class="t-amount">5 000 F</div>
+        </div>
+        <div class="tier-opt" data-cat="VIP">
+          <div class="t-amount">10 000 F</div>
+        </div>
+      </div>
+      <label class="field-label">Nom / référence (optionnel)</label>
+      <input type="text" id="new-card-name" placeholder="Ex. Table Diallo, invité n°12" style="margin-bottom:14px;">
+      <div class="row">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--cream-dim);flex:0 0 auto;">
+          <input type="checkbox" id="new-card-paid" style="width:16px;height:16px;">
+          Déjà payée
+        </label>
+      </div>
+      <button class="btn btn-gold" id="btn-create-card" style="margin-top:14px;">Générer la carte</button>
+
+      <div class="new-card-result" id="new-card-result" style="display:none;">
+        <div id="qr-target"></div>
+        <div class="li-code" id="new-card-code"></div>
+        <div class="row" style="margin-top:12px;">
+          <button class="btn btn-ghost" id="btn-download-qr">Télécharger le QR</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Toutes les cartes</h3>
+      <input type="text" class="search-box" id="search-input" placeholder="Rechercher par code ou nom…">
+      <div id="cards-list"><div class="muted">Chargement…</div></div>
+    </div>
+  </section>
+
+  <!-- STATS -->
+  <section class="panel" id="panel-stats">
+    <div id="print-header">
+      <h2>Contrôle d'accès — Carte de Dîner — Rapport statistiques</h2>
+      <div id="print-meta"></div>
+    </div>
+    <div class="card">
+      <h3>Vue d'ensemble</h3>
+      <div class="stat-grid" id="stats-grid">
+        <div class="stat-box"><div class="val" id="s-total">–</div><div class="lab">Cartes créées</div></div>
+        <div class="stat-box"><div class="val" id="s-paid">–</div><div class="lab">Cartes payées</div></div>
+        <div class="stat-box"><div class="val" id="s-entered">–</div><div class="lab">Entrées enregistrées</div></div>
+        <div class="stat-box"><div class="val" id="s-revenue">–</div><div class="lab">Total encaissé</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Total des cartes par catégorie</h3>
+      <div id="stats-detail" class="muted">Chargement…</div>
+    </div>
+    <button class="btn btn-ghost" id="btn-print-stats">Imprimer le rapport</button>
+  </section>
+
+  <div class="app-footer">
+    <div class="brand">Réalisé par <strong>WEBSI-THIES</strong></div>
+    <div class="tel">Tel: 774933008</div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const fmt = n => new Intl.NumberFormat('fr-FR').format(n) + ' F';
+const timeFmt = ts => ts ? new Date(ts).toLocaleString('fr-FR', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+
+/* ---------- Card categories (matches the printed QR batches) ---------- */
+const CATEGORIES = {
+  S:   { label:'Cartes Solidarité', montant:5000,  count:250, prefix:'S-' },
+  VIP: { label:'Cartes VIP',        montant:10000, count:100, prefix:'VIP-' }
+};
+function categoryOf(code){
+  if(!code) return null;
+  if(code.startsWith('VIP-')) return 'VIP';
+  if(code.startsWith('S-')) return 'S';
+  return null;
+}
+
+function showToast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(showToast._h);
+  showToast._h = setTimeout(()=> t.classList.remove('show'), 2400);
+}
+
+/* ---------- Tabs ---------- */
+document.querySelectorAll('.tab-btn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('panel-'+btn.dataset.tab).classList.add('active');
+    if(btn.dataset.tab === 'gestion') refreshCardsList();
+    if(btn.dataset.tab === 'stats') refreshStats();
+    if(btn.dataset.tab !== 'scan') stopCamera();
+  });
+});
+
+/* ---------- Storage layer ----------
+   Priority order: 1) Firebase Firestore (shared, cross-device, works on
+   GitHub Pages or any host — configure it in the <script type="module"> at
+   the top of this file) 2) window.storage (shared, cross-device — only
+   present when this file runs as a Claude Artifact) 3) the browser's
+   localStorage (works everywhere but stays on that one device only).
+   Every function below (getCard, saveCard, listAllCards, etc.) is unchanged
+   — they just call storageGet/Set/Delete/ListKeys, so the rest of the app
+   doesn't need to know which backend is actually active. */
+const hasCloudStorage = !!(window.storage && typeof window.storage.get === 'function');
+
+async function useFirebase(){
+  if(window.__firebaseReady) await window.__firebaseReady;
+  return !!(window.__firebase && window.__firebase.ready);
+}
+
+(async function showBackendStatus(){
+  const el = document.getElementById('backend-status');
+  if(!el) return;
+  const fb = await useFirebase();
+  if(fb){
+    el.textContent = '🟢 Base de données Firebase connectée — partagée entre tous les téléphones';
+  }else if(hasCloudStorage){
+    el.textContent = '🟡 Stockage Claude (partagé dans cette session d\'artifact)';
+  }else{
+    const why = window.__firebaseError ? (' — Firebase : ' + window.__firebaseError) : '';
+    el.textContent = '🔴 Stockage local uniquement — non partagé entre appareils' + why;
+  }
+})();
+
+async function storageGet(key){
+  if(await useFirebase()){
+    try{
+      const value = await window.__firebase.get(key);
+      return value !== null ? {key, value} : null;
+    }catch(e){ console.warn('Firebase get error, falling back', e); }
+  }
+  if(hasCloudStorage){
+    try{ return await window.storage.get(key, true); }catch(e){ return null; }
+  }
+  try{
+    const raw = localStorage.getItem('gala:'+key);
+    return raw !== null ? {key, value: raw} : null;
+  }catch(e){ return null; }
+}
+async function storageSet(key, value){
+  if(await useFirebase()){
+    try{ await window.__firebase.set(key, value); return {key, value}; }catch(e){ console.warn('Firebase set error, falling back', e); }
+  }
+  if(hasCloudStorage){
+    try{ return await window.storage.set(key, value, true); }catch(e){ return null; }
+  }
+  try{ localStorage.setItem('gala:'+key, value); return {key, value}; }catch(e){ return null; }
+}
+async function storageDelete(key){
+  if(await useFirebase()){
+    try{ await window.__firebase.delete(key); return {key, deleted:true}; }catch(e){ console.warn('Firebase delete error, falling back', e); }
+  }
+  if(hasCloudStorage){
+    try{ return await window.storage.delete(key, true); }catch(e){ return null; }
+  }
+  try{ localStorage.removeItem('gala:'+key); return {key, deleted:true}; }catch(e){ return null; }
+}
+async function storageListKeys(prefix){
+  if(await useFirebase()){
+    try{ return await window.__firebase.listByPrefix(prefix); }catch(e){ console.warn('Firebase list error, falling back', e); }
+  }
+  if(hasCloudStorage){
+    try{
+      const r = await window.storage.list(prefix, true);
+      return (r && r.keys) || [];
+    }catch(e){ return []; }
+  }
+  try{
+    const keys = [];
+    for(let i=0;i<localStorage.length;i++){
+      const k = localStorage.key(i);
+      if(k && k.startsWith('gala:'+prefix)) keys.push(k.slice('gala:'.length));
+    }
+    return keys;
+  }catch(e){ return []; }
+}
+
+/* ---------- Storage helpers ---------- */
+async function getCard(code){
+  const r = await storageGet('card:'+code);
+  try{ return r ? JSON.parse(r.value) : null; }catch(e){ return null; }
+}
+async function saveCard(card){
+  await storageSet('card:'+card.code, JSON.stringify(card));
+}
+/* Every entry under a prefix as [{key,value}] — one single request on Firebase,
+   one request per key on the other backends. */
+async function storageListEntries(prefix){
+  if(await useFirebase() && window.__firebase.listAll){
+    try{ return await window.__firebase.listAll(prefix); }catch(e){ console.warn('Firebase list error, falling back', e); }
+  }
+  const keys = await storageListKeys(prefix);
+  return Promise.all(keys.map(async k=>{
+    const r = await storageGet(k);
+    return { key:k, value: r ? r.value : null };
+  }));
+}
+async function listAllCards(){
+  const entries = await storageListEntries('card:');
+  const cards = entries.map(e=>{
+    try{ return e.value ? JSON.parse(e.value) : null; }catch(err){ return null; }
+  });
+  return cards.filter(Boolean).sort((a,b)=> b.created_at - a.created_at);
+}
+function genCode(){
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = 'GALA-';
+  for(let i=0;i<6;i++) s += chars[Math.floor(Math.random()*chars.length)];
+  return s;
+}
+async function genUniqueCode(){
+  let code;
+  do{ code = genCode(); } while(await getCard(code));
+  return code;
+}
+
+/* Extra (non pre-printed) cards get a category-prefixed code that can't collide
+   with the imported sequential ones (S-001…, VIP-001…): e.g. S-X4F82K */
+function genExtraCode(catKey){
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = CATEGORIES[catKey].prefix + 'X';
+  for(let i=0;i<5;i++) s += chars[Math.floor(Math.random()*chars.length)];
+  return s;
+}
+async function genUniqueExtraCode(catKey){
+  let code;
+  do{ code = genExtraCode(catKey); } while(await getCard(code));
+  return code;
+}
+
+/* ---------- Import the printed QR codes (S-001…S-250, VIP-001…VIP-100) ---------- */
+async function seedPrintedCards(onProgress){
+  const toCreate = [];
+  Object.keys(CATEGORIES).forEach(key=>{
+    const cat = CATEGORIES[key];
+    for(let i=1;i<=cat.count;i++){
+      toCreate.push({ code: cat.prefix + String(i).padStart(3,'0'), category:key, montant:cat.montant });
+    }
+  });
+  let created = 0, skipped = 0;
+  const existingCodes = new Set((await storageListKeys('card:')).map(k=>k.slice('card:'.length)));
+  const chunkSize = 20;
+  for(let i=0;i<toCreate.length;i+=chunkSize){
+    const chunk = toCreate.slice(i, i+chunkSize);
+    await Promise.all(chunk.map(async item=>{
+      if(existingCodes.has(item.code)){ skipped++; return; }
+      const card = {
+        code:item.code, category:item.category, montant:item.montant,
+        paye:false, entree:false, paye_at:null, entree_at:null, nom:'', created_at: Date.now()
+      };
+      await saveCard(card);
+      created++;
+    }));
+    if(onProgress) onProgress(Math.min(i+chunkSize, toCreate.length), toCreate.length);
+  }
+  return {created, skipped, total: toCreate.length};
+}
+
+/* Removes cards left over from a previous card range: the discontinued
+   20 000 F (G-…) tier, and any 4-digit-padded S-/VIP- codes from the old
+   numbering scheme (S-0001…, VIP-0001…) now replaced by S-001…S-250 and
+   VIP-001…VIP-100. Extra cards created manually (e.g. S-X4F82K) are untouched. */
+async function cleanupLegacyCards(onProgress){
+  const cards = await listAllCards();
+  let deleted = 0;
+  const toDelete = cards.filter(c=>{
+    const code = c.code || '';
+    if((c.category || categoryOf(code)) === 'G' || code.startsWith('G-')) return true;
+    let m = code.match(/^S-(\d+)$/);
+    if(m) return m[1].length !== 3 || parseInt(m[1],10) > CATEGORIES.S.count;
+    m = code.match(/^VIP-(\d+)$/);
+    if(m) return m[1].length !== 3 || parseInt(m[1],10) > CATEGORIES.VIP.count;
+    return false;
+  });
+  const chunkSize = 20;
+  for(let i=0;i<toDelete.length;i+=chunkSize){
+    const chunk = toDelete.slice(i, i+chunkSize);
+    await Promise.all(chunk.map(async c=>{
+      await storageDelete('card:'+c.code);
+      deleted++;
+    }));
+    if(onProgress) onProgress(Math.min(i+chunkSize, toDelete.length), toDelete.length);
+  }
+  return { deleted, total: toDelete.length };
+}
+
+async function ensureSeeded(){
+  const flag = await storageGet('meta:seed_v2');
+  if(flag) return;
+  const status = document.getElementById('seed-status');
+  if(status) status.textContent = 'Mise à jour des cartes en cours…';
+  await cleanupLegacyCards((done,total)=>{
+    if(status && total) status.textContent = `Nettoyage des anciennes cartes… ${done}/${total}`;
+  });
+  const res = await seedPrintedCards((done,total)=>{
+    if(status) status.textContent = `Import en cours… ${done}/${total}`;
+  });
+  await storageSet('meta:seed_v2', '1');
+  if(status) status.textContent = `Import terminé : ${res.created} carte(s) ajoutée(s), ${res.skipped} déjà présente(s).`;
+  refreshCardsList();
+}
+
+document.getElementById('btn-seed').addEventListener('click', async ()=>{
+  const btn = document.getElementById('btn-seed');
+  const status = document.getElementById('seed-status');
+  btn.disabled = true; btn.textContent = 'Import en cours…';
+  await cleanupLegacyCards((done,total)=>{
+    if(total) status.textContent = `Nettoyage des anciennes cartes… ${done}/${total}`;
+  });
+  const res = await seedPrintedCards((done,total)=>{
+    status.textContent = `Import en cours… ${done}/${total}`;
+  });
+  await storageSet('meta:seed_v2', '1');
+  status.textContent = `Import terminé : ${res.created} carte(s) ajoutée(s), ${res.skipped} déjà présente(s) sur ${res.total}.`;
+  btn.disabled = false; btn.textContent = 'Importer / vérifier les cartes imprimées';
+  showToast('Cartes imprimées importées');
+  refreshCardsList();
+});
+
+/* ---------- Import cards from an Excel file (Code / Catégorie / Montant columns) ---------- */
+async function importRows(rows, onProgress){
+  let created = 0, skipped = 0, invalid = 0;
+  const chunkSize = 20;
+  for(let i=0;i<rows.length;i+=chunkSize){
+    const chunk = rows.slice(i, i+chunkSize);
+    await Promise.all(chunk.map(async row=>{
+      const code = String(row['Code'] ?? row['code'] ?? '').trim();
+      if(!code){ invalid++; return; }
+      let cat = String(row['Catégorie'] ?? row['Categorie'] ?? row['categorie'] ?? '').trim().toUpperCase();
+      if(!CATEGORIES[cat]) cat = categoryOf(code) || '';
+      if(!CATEGORIES[cat]){ invalid++; return; }
+      const montantRaw = row['Montant'] ?? row['montant'] ?? '';
+      const parsedMontant = parseInt(String(montantRaw).replace(/[^0-9]/g,''), 10);
+      const montant = Number.isFinite(parsedMontant) && parsedMontant > 0 ? parsedMontant : CATEGORIES[cat].montant;
+      const existing = await getCard(code);
+      if(existing){ skipped++; return; }
+      await saveCard({ code, category:cat, montant, paye:false, entree:false, paye_at:null, entree_at:null, nom:'', created_at: Date.now() });
+      created++;
+    }));
+    if(onProgress) onProgress(Math.min(i+chunkSize, rows.length), rows.length);
+  }
+  return { created, skipped, invalid, total: rows.length };
+}
+
+document.getElementById('excel-input').addEventListener('change', async (e)=>{
+  const file = e.target.files[0];
+  const status = document.getElementById('excel-status');
+  if(!file) return;
+  status.textContent = 'Lecture du fichier…';
+  try{
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, {type:'array'});
+    let rows = [];
+    wb.SheetNames.forEach(name=>{
+      const json = XLSX.utils.sheet_to_json(wb.Sheets[name], {defval:''});
+      rows = rows.concat(json);
+    });
+    if(rows.length === 0){
+      status.textContent = "Aucune ligne trouvée dans ce fichier.";
+      return;
+    }
+    const res = await importRows(rows, (done,total)=>{
+      status.textContent = `Import en cours… ${done}/${total}`;
+    });
+    status.textContent = `Import terminé : ${res.created} carte(s) ajoutée(s), ${res.skipped} déjà présente(s)`
+      + (res.invalid ? `, ${res.invalid} ligne(s) ignorée(s) (code ou catégorie manquant)` : '') + '.';
+    showToast('Fichier Excel importé');
+    refreshCardsList();
+  }catch(err){
+    status.textContent = "Erreur de lecture — vérifiez qu'il s'agit bien d'un fichier .xlsx valide avec des colonnes Code / Catégorie / Montant.";
+    showToast('Erreur import Excel');
+  }
+  e.target.value = '';
+});
+
+/* ---------- Scanner: camera (Android + iPhone compatible) ---------- */
+let stream = null, rafId = null, currentFacing = 'environment';
+const video = document.createElement('video');
+video.setAttribute('playsinline','');
+video.setAttribute('webkit-playsinline','');
+video.setAttribute('autoplay','');
+video.muted = true;
+
+async function startCamera(){
+  const box = document.getElementById('video-box');
+
+  const isSecure = window.isSecureContext || location.protocol === 'https:' || location.hostname === 'localhost';
+  if(!isSecure){
+    box.innerHTML = "<div class=\"muted\" style=\"padding:0 16px;text-align:center;\">La caméra ne fonctionne que sur une page ouverte en HTTPS (ou dans l'app Claude). Ce fichier a été ouvert en local, donc iOS/Android bloquent l'accès caméra.<br><br>Utilisez l'import d'image ou la saisie manuelle, ou hébergez ce fichier sur un site en HTTPS.</div>";
+    showToast('Caméra bloquée : connexion non sécurisée (HTTPS requis)');
+    return;
+  }
+
+  if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)){
+    box.innerHTML = "<div class=\"muted\" style=\"padding:0 16px;text-align:center;\">La caméra nécessite une connexion sécurisée (HTTPS) et un navigateur récent.<br>Utilisez plutôt l'import d'image ou la saisie manuelle.</div>";
+    showToast('Caméra indisponible sur ce navigateur');
+    return;
+  }
+
+  if(typeof jsQR !== 'function'){
+    box.innerHTML = "<div class=\"muted\" style=\"padding:0 16px;text-align:center;\">La librairie de lecture des QR codes n'a pas pu se charger (pas de connexion internet au chargement de la page ?).<br>Rechargez la page avec une bonne connexion, ou utilisez la saisie manuelle.</div>";
+    showToast('Librairie de scan non chargée — rechargez la page');
+    return;
+  }
+
+  try{
+    try{
+      // 'ideal' (not 'exact') avoids OverconstrainedError on some iPhones/Android devices
+      stream = await navigator.mediaDevices.getUserMedia({
+        video:{ facingMode:{ ideal: currentFacing } }, audio:false
+      });
+    }catch(e1){
+      // Fallback: any available camera
+      stream = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+    }
+    box.innerHTML = '';
+    box.appendChild(video);
+    const frame = document.createElement('div');
+    frame.className = 'scan-frame';
+    frame.innerHTML = '<div class="scan-check">✓</div>';
+    box.appendChild(frame);
+    video.srcObject = stream;
+    await video.play();
+    document.getElementById('btn-camera').textContent = 'Désactiver la caméra';
+    document.getElementById('scan-hint').style.display = 'block';
+    document.getElementById('scan-hint').textContent = 'Visez le QR code de la carte';
+    document.getElementById('btn-switch-camera').style.display = 'block';
+    scanLoop();
+  }catch(e){
+    box.innerHTML = "<div class=\"muted\" style=\"padding:0 16px;text-align:center;\">Caméra indisponible sur cet appareil ou permission refusée.<br>iPhone : Réglages → Safari → Caméra doit être autorisé.<br>Android : autorisez la caméra dans les paramètres du navigateur.<br>Vous pouvez sinon utiliser l'import d'image ou la saisie manuelle.</div>";
+    showToast("Caméra inaccessible — utilisez l'import ou la saisie manuelle");
+  }
+}
+function stopCamera(){
+  if(rafId) cancelAnimationFrame(rafId);
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+  const box = document.getElementById('video-box');
+  box.innerHTML = '<div class="muted" id="video-placeholder">Caméra désactivée</div>';
+  document.getElementById('btn-camera').textContent = 'Activer la caméra';
+  document.getElementById('scan-hint').style.display = 'none';
+  document.getElementById('btn-switch-camera').style.display = 'none';
+}
+document.getElementById('btn-camera').addEventListener('click', ()=>{
+  unlockAudio();
+  if(stream) stopCamera(); else startCamera();
+});
+document.getElementById('btn-switch-camera').addEventListener('click', ()=>{
+  currentFacing = currentFacing === 'environment' ? 'user' : 'environment';
+  stopCamera();
+  startCamera();
+});
+
+const canvas = document.createElement('canvas');
+const ctx = canvas.getContext('2d', {willReadFrequently:true});
+let lastScanTime = 0;
+
+/* ---------- Scan feedback: beep + flash + vibrate ---------- */
+let audioCtx = null;
+function unlockAudio(){
+  try{
+    if(!audioCtx){ audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    if(audioCtx.state === 'suspended'){ audioCtx.resume(); }
+  }catch(e){ /* Web Audio unavailable */ }
+}
+function playBeep(){
+  if(!audioCtx) return;
+  try{
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 920;
+    const t = audioCtx.currentTime;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.25, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.18);
+  }catch(e){ /* ignore */ }
+}
+function flashScanFrame(){
+  const frame = document.querySelector('#video-box .scan-frame');
+  if(!frame) return;
+  frame.classList.remove('flash');
+  void frame.offsetWidth; // restart animation
+  frame.classList.add('flash');
+  setTimeout(()=>frame.classList.remove('flash'), 500);
+}
+function scrollToResult(){
+  setTimeout(()=>{
+    const el = document.getElementById('result-zone');
+    if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
+  }, 60);
+}
+function scanLoop(){
+  if(!stream) return;
+  try{
+    if(video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0 && video.videoHeight > 0){
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const img = ctx.getImageData(0,0,canvas.width,canvas.height);
+      const code = jsQR(img.data, img.width, img.height);
+      if(code && code.data && Date.now() - lastScanTime > 1500){
+        lastScanTime = Date.now();
+        navigator.vibrate && navigator.vibrate(80);
+        flashScanFrame();
+        playBeep();
+        handleScan(code.data.trim());
+      }
+    }
+  }catch(err){
+    // A single bad frame (e.g. Safari throwing on a 0x0 read right as the
+    // camera warms up) must never kill the whole camera session.
+  }
+  if(stream) rafId = requestAnimationFrame(scanLoop);
+}
+
+/* ---------- Scanner: image upload ---------- */
+document.getElementById('file-input').addEventListener('change', (e)=>{
+  unlockAudio();
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev)=>{
+    const img = new Image();
+    img.onload = ()=>{
+      canvas.width = img.width; canvas.height = img.height;
+      ctx.drawImage(img,0,0);
+      const data = ctx.getImageData(0,0,canvas.width,canvas.height);
+      const result = jsQR(data.data, data.width, data.height);
+      if(result && result.data){
+        playBeep();
+        handleScan(result.data.trim());
+      }else{
+        showToast('Aucun QR code détecté dans cette image');
+      }
+    };
+    img.src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+  e.target.value = '';
+});
+
+/* ---------- Scanner: manual entry ---------- */
+document.getElementById('btn-manual').addEventListener('click', ()=>{
+  const v = document.getElementById('manual-code').value.trim();
+  if(v) handleScan(v);
+});
+document.getElementById('manual-code').addEventListener('keydown', (e)=>{
+  if(e.key === 'Enter'){ e.preventDefault(); document.getElementById('btn-manual').click(); }
+});
+
+/* ---------- Handle a scanned/entered code ---------- */
+async function handleScan(rawCode){
+  const code = rawCode.toUpperCase();
+  const zone = document.getElementById('result-zone');
+  zone.innerHTML = '<div class="muted" style="text-align:center;padding:20px;">Vérification…</div>';
+  scrollToResult();
+  const card = await getCard(code);
+  if(!card){
+    renderUnknown(code);
+  }else{
+    renderCard(card);
+  }
+}
+
+function renderUnknown(code){
+  const zone = document.getElementById('result-zone');
+  const detected = categoryOf(code); // auto-detect S-/G- prefix from the scanned code
+  zone.innerHTML = `
+    <div class="card" style="border-color:var(--red);">
+      <div class="badge badge-unpaid" style="margin-bottom:10px;">Carte introuvable</div>
+      <div class="li-code" style="font-size:15px;margin-bottom:4px;">${code}</div>
+      <div class="muted" style="margin-bottom:14px;">Ce code n'existe pas dans le système.${detected ? ' Catégorie détectée automatiquement d\u2019après le code.' : ''} Vous pouvez l'enregistrer comme nouvelle carte.</div>
+      <label class="field-label">Catégorie</label>
+      <div class="tier-choice" id="unknown-tier-choice">
+        <div class="tier-opt ${detected==='S' || !detected ? 'selected':''}" data-cat="S"><div class="t-amount">5 000 F</div><div class="t-label">Solidarité</div></div>
+        <div class="tier-opt ${detected==='VIP' ? 'selected':''}" data-cat="VIP"><div class="t-amount">10 000 F</div><div class="t-label">VIP</div></div>
+      </div>
+      <button class="btn btn-gold" id="btn-register-unknown">Créer cette carte (non payée)</button>
+    </div>`;
+  const opts = zone.querySelectorAll('#unknown-tier-choice .tier-opt');
+  let cat = detected || 'S';
+  opts.forEach(o=>o.addEventListener('click', ()=>{
+    opts.forEach(x=>x.classList.remove('selected'));
+    o.classList.add('selected');
+    cat = o.dataset.cat;
+  }));
+  zone.querySelector('#btn-register-unknown').addEventListener('click', async ()=>{
+    const montant = CATEGORIES[cat].montant;
+    const card = {code, category:cat, montant, paye:false, entree:false, paye_at:null, entree_at:null, nom:'', created_at: Date.now()};
+    await saveCard(card);
+    showToast('Carte créée');
+    renderCard(card);
+  });
+}
+
+function renderCard(card){
+  const zone = document.getElementById('result-zone');
+  const cat = card.category || categoryOf(card.code) || 'S';
+  const tierClass = cat === 'VIP' ? 'tier-vip' : 'tier-5000';
+  const catLabel = cat === 'VIP' ? 'Cartes VIP' : 'Cartes Solidarité';
+  let html = `<div class="ticket ${tierClass}">
+    <div class="ticket-top">
+      <div>
+        <div class="ticket-code">${card.code}${card.nom ? ' · '+escapeHtml(card.nom) : ''}</div>
+      </div>
+      <span class="badge ${card.paye ? 'badge-paid' : 'badge-unpaid'}">${card.paye ? 'Payée' : 'Non payée'}</span>
+    </div>
+    <div class="amount">${fmt(card.montant)}</div>
+    <div class="amount-label">${catLabel}</div>`;
+
+  if(card.paye){
+    html += `<div class="status-line">Encaissée le <strong>${timeFmt(card.paye_at)}</strong></div>`;
+  }
+  if(card.entree){
+    html += `<div class="status-line">Entrée enregistrée à <strong>${timeFmt(card.entree_at)}</strong></div>`;
+  }
+
+  html += `<div class="ticket-actions">`;
+  if(!card.paye){
+    html += `<button class="btn btn-gold" id="btn-encaisser">Encaisser ${fmt(card.montant)}</button>`;
+  } else if(!card.entree){
+    html += `<button class="btn btn-green" id="btn-entree">Enregistrer l'entrée</button>`;
+  } else {
+    html += `<div class="muted" style="text-align:center;">Cette carte a déjà été utilisée pour entrer.</div>`;
+  }
+  html += `</div>`;
+  if(card.paye || card.entree){
+    html += `<div class="row" style="margin-top:8px;">`;
+    if(card.entree){
+      html += `<button class="btn btn-danger btn-sm" id="btn-cancel-entree" style="flex:1;">Annuler l'entrée</button>`;
+    }
+    if(card.paye){
+      html += `<button class="btn btn-danger btn-sm" id="btn-cancel-paye" style="flex:1;">Annuler le paiement</button>`;
+    }
+    html += `</div>`;
+  }
+  if(card.entree){
+    html += `<div class="stamp">ENTRÉE<br>${timeFmt(card.entree_at).split(' ')[1]||''}</div>`;
+  }
+  html += `</div>`;
+  zone.innerHTML = html;
+
+  const bEnc = zone.querySelector('#btn-encaisser');
+  if(bEnc) bEnc.addEventListener('click', async ()=>{
+    card.paye = true;
+    card.paye_at = Date.now();
+    await saveCard(card);
+    showToast('Carte encaissée — '+fmt(card.montant));
+    renderCard(card);
+  });
+  const bEnt = zone.querySelector('#btn-entree');
+  if(bEnt) bEnt.addEventListener('click', async ()=>{
+    card.entree = true;
+    card.entree_at = Date.now();
+    await saveCard(card);
+    showToast('Entrée enregistrée');
+    renderCard(card);
+  });
+  const bCancelEnt = zone.querySelector('#btn-cancel-entree');
+  if(bCancelEnt) bCancelEnt.addEventListener('click', async ()=>{
+    if(!confirm("Annuler l'entrée enregistrée pour cette carte ?")) return;
+    card.entree = false;
+    card.entree_at = null;
+    await saveCard(card);
+    showToast('Entrée annulée');
+    renderCard(card);
+  });
+  const bCancelPaye = zone.querySelector('#btn-cancel-paye');
+  if(bCancelPaye) bCancelPaye.addEventListener('click', async ()=>{
+    if(card.entree && !confirm("Cette carte a déjà servi à entrer. Annuler quand même le paiement ?")) return;
+    if(!card.entree && !confirm('Annuler le paiement de cette carte ?')) return;
+    card.paye = false;
+    card.paye_at = null;
+    await saveCard(card);
+    showToast('Paiement annulé');
+    renderCard(card);
+  });
+}
+
+function escapeHtml(s){
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+/* ---------- Gestion: create an extra (non pre-printed) card ---------- */
+let selectedCategory = 'S';
+document.querySelectorAll('#panel-gestion .tier-choice .tier-opt').forEach(opt=>{
+  opt.addEventListener('click', ()=>{
+    opt.closest('.tier-choice').querySelectorAll('.tier-opt').forEach(o=>o.classList.remove('selected'));
+    opt.classList.add('selected');
+    selectedCategory = opt.dataset.cat;
+  });
+});
+
+document.getElementById('btn-create-card').addEventListener('click', async ()=>{
+  const btn = document.getElementById('btn-create-card');
+  btn.disabled = true; btn.textContent = 'Création…';
+  const code = await genUniqueExtraCode(selectedCategory);
+  const paid = document.getElementById('new-card-paid').checked;
+  const nom = document.getElementById('new-card-name').value.trim();
+  const card = {
+    code, category: selectedCategory, montant: CATEGORIES[selectedCategory].montant, paye: paid, entree:false,
+    paye_at: paid ? Date.now() : null, entree_at: null, nom, created_at: Date.now()
+  };
+  await saveCard(card);
+
+  const resBox = document.getElementById('new-card-result');
+  const qrTarget = document.getElementById('qr-target');
+  qrTarget.innerHTML = '';
+  new QRCode(qrTarget, {text: code, width:180, height:180, colorDark:'#241531', colorLight:'#ffffff'});
+  document.getElementById('new-card-code').textContent = code + (nom ? ' — '+nom : '');
+  resBox.style.display = 'block';
+  btn.disabled = false; btn.textContent = 'Générer la carte';
+  document.getElementById('new-card-name').value = '';
+  document.getElementById('new-card-paid').checked = false;
+  showToast('Carte '+code+' créée');
+  refreshCardsList();
+});
+
+document.getElementById('btn-download-qr').addEventListener('click', ()=>{
+  const target = document.getElementById('qr-target');
+  const img = target.querySelector('img');
+  const canvasEl = target.querySelector('canvas');
+  const src = img ? img.src : (canvasEl ? canvasEl.toDataURL('image/png') : null);
+  if(!src) return;
+  const a = document.createElement('a');
+  a.href = src;
+  a.download = document.getElementById('new-card-code').textContent.split(' ')[0] + '.png';
+  a.click();
+});
+
+/* ---------- Gestion: cards list ---------- */
+let allCardsCache = [];
+async function refreshCardsList(){
+  const el = document.getElementById('cards-list');
+  el.innerHTML = '<div class="muted">Chargement…</div>';
+  allCardsCache = await listAllCards();
+  renderCardsList(allCardsCache);
+}
+function renderCardsList(cards){
+  const el = document.getElementById('cards-list');
+  if(cards.length === 0){
+    el.innerHTML = '<div class="empty-state"><i>—</i>Aucune carte pour le moment.</div>';
+    return;
+  }
+  el.innerHTML = cards.map(c => {
+    const cat = c.category || categoryOf(c.code);
+    const catLabel = cat === 'VIP' ? 'VIP' : (cat === 'S' ? 'Solidarité' : '');
+    return `
+    <div class="list-item">
+      <div class="li-left">
+        <div class="li-code">${c.code}${c.nom ? ' · '+escapeHtml(c.nom) : ''}</div>
+        <div class="li-meta">${catLabel ? catLabel+' · ' : ''}${fmt(c.montant)}${c.entree ? ' · entrée '+timeFmt(c.entree_at) : ''}</div>
+      </div>
+      <div class="li-badges">
+        <span class="badge ${c.paye ? 'badge-paid':'badge-unpaid'}">${c.paye ? 'Payée':'Non payée'}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+document.getElementById('search-input').addEventListener('input', (e)=>{
+  const q = e.target.value.trim().toLowerCase();
+  if(!q){ renderCardsList(allCardsCache); return; }
+  renderCardsList(allCardsCache.filter(c =>
+    c.code.toLowerCase().includes(q) || (c.nom||'').toLowerCase().includes(q)
+  ));
+});
+
+/* ---------- Stats ---------- */
+async function refreshStats(){
+  const cards = await listAllCards();
+  const total = cards.length;
+  const paid = cards.filter(c=>c.paye);
+  const entered = cards.filter(c=>c.entree);
+  const revenue = paid.reduce((s,c)=>s+c.montant,0);
+  document.getElementById('s-total').textContent = total;
+  document.getElementById('s-paid').textContent = paid.length;
+  document.getElementById('s-entered').textContent = entered.length;
+  document.getElementById('s-revenue').textContent = fmt(revenue);
+
+  const rows = Object.keys(CATEGORIES).map(key=>{
+    const cat = CATEGORIES[key];
+    const inCat = cards.filter(c => (c.category || categoryOf(c.code)) === key);
+    const paidCat = inCat.filter(c=>c.paye);
+    const enteredCat = inCat.filter(c=>c.entree);
+    const revCat = paidCat.reduce((s,c)=>s+c.montant,0);
+    return { label: cat.label, printed: cat.count, total: inCat.length, paid: paidCat.length, entered: enteredCat.length, revenue: revCat };
+  });
+  const known = Object.keys(CATEGORIES);
+  const other = cards.filter(c => !known.includes(c.category || categoryOf(c.code)));
+
+  document.getElementById('stats-detail').innerHTML = rows.map(r => `
+    <div class="list-item">
+      <div class="li-left">
+        <div class="li-code">${r.label}</div>
+        <div class="li-meta">${r.total} carte(s) enregistrée(s) sur ${r.printed} imprimées</div>
+      </div>
+      <div class="li-left" style="align-items:flex-end;text-align:right;">
+        <div class="li-meta">${r.paid} payée(s) · ${r.entered} entrée(s)</div>
+        <div class="li-meta">${fmt(r.revenue)}</div>
+      </div>
+    </div>`).join('')
+    + (other.length ? `<div class="list-item"><div class="li-left"><div class="li-code">Autres cartes</div><div class="li-meta">${other.length} carte(s) hors catégories connues</div></div></div>` : '');
+}
+
+document.getElementById('btn-print-stats').addEventListener('click', async ()=>{
+  await refreshStats();
+  document.getElementById('print-meta').textContent = 'Généré le ' + new Date().toLocaleString('fr-FR');
+  document.body.classList.add('printing');
+  setTimeout(()=>{ window.print(); }, 50);
+});
+window.addEventListener('afterprint', ()=>{
+  document.body.classList.remove('printing');
+});
+
+refreshCardsList();
+ensureSeeded();
+</script>
+</body>
+</html>
