@@ -7,6 +7,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script>
+  /* Created synchronously, before any other script, so it's always defined
+     no matter which of the module script (deferred) or the classic script
+     at the bottom of the page happens to run first. */
+  window.__firebaseReady = new Promise(resolve => { window.__resolveFirebaseReady = resolve; });
+</script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -31,12 +37,13 @@
   };
 
 
-  window.__firebaseReady = (async () => {
+  (async () => {
     if(!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('VOTRE_')){
       console.info('Firebase non configuré — utilisation du stockage de secours.');
       window.__firebase = { ready:false };
       window.__firebaseAuth = { ready:false };
-      return false;
+      window.__resolveFirebaseReady(false);
+      return;
     }
     try{
       const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js');
@@ -79,12 +86,12 @@
         onChange: (cb) => onAuthStateChanged(auth, cb)
       };
       console.info('Firebase connecté — base de données partagée active.');
-      return true;
+      window.__resolveFirebaseReady(true);
     }catch(e){
       console.warn('Connexion Firebase impossible, utilisation du stockage de secours.', e);
       window.__firebase = { ready:false };
       window.__firebaseAuth = { ready:false };
-      return false;
+      window.__resolveFirebaseReady(false);
     }
   })();
 </script>
@@ -1271,16 +1278,34 @@ async function useFirebaseAuth(){
   return !!(window.__firebaseAuth && window.__firebaseAuth.ready);
 }
 
+function withTimeout(promise, ms, fallback){
+  return Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(()=> resolve(fallback), ms))
+  ]);
+}
+
 (async function gateAccess(){
   const appRoot = document.getElementById('app-root');
   const gate = document.getElementById('login-gate');
   const logoutBtn = document.getElementById('btn-logout');
 
-  if(!(await useFirebaseAuth())){
+  /* If Firebase never settles (some in-app browsers silently block the
+     gstatic.com imports instead of failing fast), don't leave the page
+     blank forever — show the app after a few seconds. The real security
+     boundary is the Firestore rules, not this UI gate, so failing open
+     here is safe. */
+  if(!(await withTimeout(useFirebaseAuth(), 6000, false))){
     appRoot.style.display = '';
     startApp();
     return;
   }
+
+  /* Show the login form right away instead of waiting on Firebase's first
+     auth callback: some in-app browsers (WhatsApp, Instagram, etc. on iOS)
+     restrict the storage Firebase Auth needs and that callback may never
+     fire, which would otherwise leave the page blank forever. */
+  gate.style.display = 'flex';
 
   window.__firebaseAuth.onChange(user => {
     if(user){
@@ -1311,7 +1336,6 @@ document.getElementById('login-form').addEventListener('submit', async (e)=>{
   }
   btn.disabled = false; btn.textContent = 'Se connecter';
 });
-
 document.getElementById('btn-logout').addEventListener('click', async ()=>{
   if(window.__firebaseAuth && window.__firebaseAuth.ready) await window.__firebaseAuth.signOut();
 });
