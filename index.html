@@ -12,15 +12,16 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script type="module">
   /* ---------- Firebase (Firestore) — shared cloud database ----------
-     Talks to Firestore through its REST API (plain fetch), so NO Firebase SDK
-     has to be downloaded from a CDN — fewer things that can be blocked by an
-     extension, a firewall or a slow connection. Every record ("card:S-001",
-     "meta:seed_v2", ...) is one document in the "kv" collection, so all devices
-     (every staff phone) read/write the same live database.
-     If Firebase cannot be reached, the app falls back to window.storage (when
-     run as a Claude Artifact) or to this browser's localStorage (single device
-     only); the badge under the title says which one is active and why. */
-  const firebaseConfig = {
+     Fill in YOUR project's config below (Firebase console → Project settings →
+     "Your apps" → SDK setup and configuration → Config). Every card check-in
+     ("card:S-001", etc.) is stored as a document in the "kv" collection, one
+     document per key, so all devices (every staff phone) read/write the same
+     live database. If apiKey is left as the placeholder, or Firebase fails to
+     load (offline, ad-blocker, wrong config), the app automatically falls
+     back to window.storage (when running as a Claude Artifact) or to this
+     browser's localStorage (single device only) — see storageGet/Set below. */
+ 
+   const firebaseConfig = {
     apiKey: "AIzaSyDF-WW1YGzKpRQOynG_R6iDlrSpIdG3UXk",
     authDomain: "dinerucao-2026.firebaseapp.com",
     projectId: "dinerucao-2026",
@@ -29,88 +30,60 @@
     appId: "1:102765390283:web:cc3e3ec8c8ac10728eee4e"
   };
 
-  window.__firebaseError = '';
+
   window.__firebaseReady = (async () => {
     if(!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith('VOTRE_')){
-      window.__firebaseError = 'config Firebase non renseignée';
+      console.info('Firebase non configuré — utilisation du stockage de secours.');
       window.__firebase = { ready:false };
+      window.__firebaseAuth = { ready:false };
       return false;
     }
-    const root = 'https://firestore.googleapis.com/v1/projects/' +
-      encodeURIComponent(firebaseConfig.projectId) + '/databases/(default)/documents/kv';
-    const keyQ = 'key=' + encodeURIComponent(firebaseConfig.apiKey);
-    const docUrl = id => root + '/' + encodeURIComponent(id) + '?' + keyQ;
-
-    async function call(url, opts){
-      const res = await fetch(url, opts);
-      let data = null;
-      try{ data = await res.json(); }catch(e){}
-      return { res, data };
-    }
-    function fail(res, data){
-      const msg = (data && data.error && data.error.message) ? data.error.message : ('HTTP ' + res.status);
-      const err = new Error(msg); err.status = res.status; return err;
-    }
-    const strVal = d => (d && d.fields && d.fields.value && typeof d.fields.value.stringValue === 'string')
-      ? d.fields.value.stringValue : null;
-
-    const api = {
-      ready: true,
-      async get(key){
-        const { res, data } = await call(docUrl(key));
-        if(res.status === 404) return null;
-        if(!res.ok) throw fail(res, data);
-        return strVal(data);
-      },
-      async set(key, value){
-        const { res, data } = await call(docUrl(key), {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fields: {
-            value: { stringValue: value },
-            updated_at: { integerValue: String(Date.now()) }
-          }})
-        });
-        if(!res.ok) throw fail(res, data);
-      },
-      async delete(key){
-        const { res, data } = await call(docUrl(key), { method: 'DELETE' });
-        if(!res.ok && res.status !== 404) throw fail(res, data);
-      },
-      /* All documents whose id starts with prefix, as [{key, value}], in one pass. */
-      async listAll(prefix){
-        const out = []; let token = '';
-        do{
-          const url = root + '?pageSize=300&' + keyQ + (token ? '&pageToken=' + encodeURIComponent(token) : '');
-          const { res, data } = await call(url);
-          if(!res.ok) throw fail(res, data);
-          (data.documents || []).forEach(d => {
-            let id = (d.name || '').split('/documents/kv/')[1] || '';
-            try{ id = decodeURIComponent(id); }catch(e){}
-            if(id.startsWith(prefix)) out.push({ key: id, value: strVal(d) });
-          });
-          token = data.nextPageToken || '';
-        }while(token);
-        return out;
-      },
-      async listByPrefix(prefix){ return (await api.listAll(prefix)).map(e => e.key); }
-    };
-
-    /* Connectivity + permissions check: a missing document (404) is fine. */
     try{
-      const { res, data } = await call(docUrl('_ping'));
-      const msg = (data && data.error && data.error.message) || '';
-      const dbMissing = res.status === 404 && /database|has not been used/i.test(msg) && /exist|not been used/i.test(msg);
-      if(!(res.ok || res.status === 404) || dbMissing) throw fail(res, data);
-      window.__firebase = api;
-      console.info('Firebase (Firestore REST) connecté.');
+      const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js');
+      const { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs } =
+        await import('https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js');
+      const { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } =
+        await import('https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js');
+
+      const app = initializeApp(firebaseConfig);
+      const db = getFirestore(app);
+      const auth = getAuth(app);
+
+      window.__firebase = {
+        ready: true,
+        async get(key){
+          const snap = await getDoc(doc(db, 'kv', key));
+          return snap.exists() ? snap.data().value : null;
+        },
+        async set(key, value){
+          await setDoc(doc(db, 'kv', key), { value, updated_at: Date.now() });
+        },
+        async delete(key){
+          await deleteDoc(doc(db, 'kv', key));
+        },
+        async listByPrefix(prefix){
+          const snap = await getDocs(collection(db, 'kv'));
+          const keys = [];
+          snap.forEach(d => { if(d.id.startsWith(prefix)) keys.push(d.id); });
+          return keys;
+        }
+      };
+      /* Shared "staff" login: one email/password account (created once in the
+         Firebase console) that every staff phone signs in with. The Firestore
+         security rules must require request.auth != null on the "kv"
+         collection, otherwise this login is cosmetic — see README notes. */
+      window.__firebaseAuth = {
+        ready: true,
+        signIn: (email, password) => signInWithEmailAndPassword(auth, email, password),
+        signOut: () => signOut(auth),
+        onChange: (cb) => onAuthStateChanged(auth, cb)
+      };
+      console.info('Firebase connecté — base de données partagée active.');
       return true;
     }catch(e){
-      window.__firebaseError = (e && e.status)
-        ? ('Firestore a répondu : ' + e.message)
-        : 'impossible de joindre firestore.googleapis.com (réseau, pare-feu ou extension)';
-      console.warn('Firebase indisponible :', window.__firebaseError, e);
+      console.warn('Connexion Firebase impossible, utilisation du stockage de secours.', e);
       window.__firebase = { ready:false };
+      window.__firebaseAuth = { ready:false };
       return false;
     }
   })();
@@ -345,6 +318,17 @@
   #seed-status{font-size:12px;color:var(--cream-dim);margin-top:10px;min-height:16px;}
   #print-header{display:none;}
 
+  /* Login gate */
+  #app-root{display:none;}
+  .login-gate{
+    position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+    background:var(--bg-deep);z-index:100;padding:20px;
+  }
+  .login-card{width:100%;max-width:360px;background:var(--bg-panel);border:1px solid var(--line);border-radius:var(--radius);padding:26px 22px;}
+  .login-title{font-family:'Fraunces',serif;font-weight:600;font-size:20px;text-align:center;margin:4px 0 20px;}
+  .login-error{color:var(--red);font-size:13px;min-height:16px;margin-bottom:10px;text-align:center;}
+  #btn-logout{width:auto;padding:6px 14px;display:none;margin-top:8px;}
+
   .app-footer{
     text-align:center;padding:30px 18px 6px;font-size:12px;color:var(--cream-dim);
   }
@@ -375,12 +359,29 @@
 </style>
 </head>
 <body>
-<div class="wrap">
+
+<div class="login-gate" id="login-gate">
+  <div class="login-card">
+    <div class="eyebrow" style="text-align:center;">Contrôle d'accès</div>
+    <h2 class="login-title">Connexion <span style="color:var(--gold);">Staff</span></h2>
+    <form id="login-form">
+      <label class="field-label">Email</label>
+      <input type="email" id="login-email" placeholder="staff@evenement.com" autocomplete="username" required style="margin-bottom:14px;">
+      <label class="field-label">Mot de passe</label>
+      <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required style="margin-bottom:14px;">
+      <div class="login-error" id="login-error"></div>
+      <button type="submit" class="btn btn-gold" id="login-submit">Se connecter</button>
+    </form>
+  </div>
+</div>
+
+<div class="wrap" id="app-root">
 
   <header class="top">
     <div class="eyebrow">Contrôle d'accès</div>
     <h1>Carte de <span>Dîner</span></h1>
     <div id="backend-status" style="margin-top:8px;font-size:11px;color:var(--cream-dim);"></div>
+    <button class="btn btn-ghost btn-sm" id="btn-logout">Déconnexion</button>
   </header>
 
   <nav class="tabs">
@@ -565,8 +566,7 @@ async function useFirebase(){
   }else if(hasCloudStorage){
     el.textContent = '🟡 Stockage Claude (partagé dans cette session d\'artifact)';
   }else{
-    const why = window.__firebaseError ? (' — Firebase : ' + window.__firebaseError) : '';
-    el.textContent = '🔴 Stockage local uniquement — non partagé entre appareils' + why;
+    el.textContent = '🔴 Stockage local uniquement — non partagé entre appareils (configurez Firebase)';
   }
 })();
 
@@ -631,23 +631,12 @@ async function getCard(code){
 async function saveCard(card){
   await storageSet('card:'+card.code, JSON.stringify(card));
 }
-/* Every entry under a prefix as [{key,value}] — one single request on Firebase,
-   one request per key on the other backends. */
-async function storageListEntries(prefix){
-  if(await useFirebase() && window.__firebase.listAll){
-    try{ return await window.__firebase.listAll(prefix); }catch(e){ console.warn('Firebase list error, falling back', e); }
-  }
-  const keys = await storageListKeys(prefix);
-  return Promise.all(keys.map(async k=>{
-    const r = await storageGet(k);
-    return { key:k, value: r ? r.value : null };
-  }));
-}
 async function listAllCards(){
-  const entries = await storageListEntries('card:');
-  const cards = entries.map(e=>{
-    try{ return e.value ? JSON.parse(e.value) : null; }catch(err){ return null; }
-  });
+  const keys = await storageListKeys('card:');
+  const cards = await Promise.all(keys.map(async k=>{
+    const r = await storageGet(k);
+    try{ return r ? JSON.parse(r.value) : null; }catch(e){ return null; }
+  }));
   return cards.filter(Boolean).sort((a,b)=> b.created_at - a.created_at);
 }
 function genCode(){
@@ -686,12 +675,12 @@ async function seedPrintedCards(onProgress){
     }
   });
   let created = 0, skipped = 0;
-  const existingCodes = new Set((await storageListKeys('card:')).map(k=>k.slice('card:'.length)));
   const chunkSize = 20;
   for(let i=0;i<toCreate.length;i+=chunkSize){
     const chunk = toCreate.slice(i, i+chunkSize);
     await Promise.all(chunk.map(async item=>{
-      if(existingCodes.has(item.code)){ skipped++; return; }
+      const existing = await getCard(item.code);
+      if(existing){ skipped++; return; }
       const card = {
         code:item.code, category:item.category, montant:item.montant,
         paye:false, entree:false, paye_at:null, entree_at:null, nom:'', created_at: Date.now()
@@ -1265,8 +1254,67 @@ window.addEventListener('afterprint', ()=>{
   document.body.classList.remove('printing');
 });
 
-refreshCardsList();
-ensureSeeded();
+/* ---------- Access gate: require staff login only when Firebase (the
+   shared, multi-device database) is actually active. If Firebase isn't
+   configured, the app falls back to window.storage/localStorage which are
+   already scoped to this one session/device, so there is nothing to gate. */
+let appStarted = false;
+function startApp(){
+  if(appStarted) return;
+  appStarted = true;
+  refreshCardsList();
+  ensureSeeded();
+}
+
+async function useFirebaseAuth(){
+  if(window.__firebaseReady) await window.__firebaseReady;
+  return !!(window.__firebaseAuth && window.__firebaseAuth.ready);
+}
+
+(async function gateAccess(){
+  const appRoot = document.getElementById('app-root');
+  const gate = document.getElementById('login-gate');
+  const logoutBtn = document.getElementById('btn-logout');
+
+  if(!(await useFirebaseAuth())){
+    appRoot.style.display = '';
+    startApp();
+    return;
+  }
+
+  window.__firebaseAuth.onChange(user => {
+    if(user){
+      gate.style.display = 'none';
+      appRoot.style.display = '';
+      logoutBtn.style.display = 'inline-flex';
+      startApp();
+    }else{
+      appRoot.style.display = 'none';
+      gate.style.display = 'flex';
+      logoutBtn.style.display = 'none';
+    }
+  });
+})();
+
+document.getElementById('login-form').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const email = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  const btn = document.getElementById('login-submit');
+  const err = document.getElementById('login-error');
+  err.textContent = '';
+  btn.disabled = true; btn.textContent = 'Connexion…';
+  try{
+    await window.__firebaseAuth.signIn(email, password);
+  }catch(ex){
+    err.textContent = 'Email ou mot de passe incorrect.';
+  }
+  btn.disabled = false; btn.textContent = 'Se connecter';
+});
+
+document.getElementById('btn-logout').addEventListener('click', async ()=>{
+  if(window.__firebaseAuth && window.__firebaseAuth.ready) await window.__firebaseAuth.signOut();
+});
 </script>
 </body>
 </html>
