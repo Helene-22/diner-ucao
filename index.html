@@ -49,12 +49,22 @@
       const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js');
       const { getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs } =
         await import('https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js');
-      const { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } =
+      const { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut, setPersistence, browserLocalPersistence } =
         await import('https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js');
 
       const app = initializeApp(firebaseConfig);
       const db = getFirestore(app);
       const auth = getAuth(app);
+      /* Default persistence relies on IndexedDB plus a hidden iframe to the
+         authDomain for cross-tab sync — Safari's anti-tracking protections
+         often block that iframe, which signs the user straight back out
+         right after a successful login. Plain localStorage persistence
+         avoids that mechanism entirely. */
+      try{
+        await setPersistence(auth, browserLocalPersistence);
+      }catch(e){
+        console.warn('Persistance locale indisponible, utilisation du mode par défaut.', e);
+      }
 
       window.__firebase = {
         ready: true,
@@ -325,8 +335,11 @@
   #seed-status{font-size:12px;color:var(--cream-dim);margin-top:10px;min-height:16px;}
   #print-header{display:none;}
 
-  /* Login gate */
-  #app-root{display:none;}
+  /* Login gate — an opaque full-screen overlay (not a display:none on the
+     app itself): #app-root stays visible by default so the app is never
+     stuck blank if the gating script fails to run for any reason (e.g.
+     ES modules are blocked outright when the page is opened via file://).
+     When login is required, this overlay covers the whole viewport instead. */
   .login-gate{
     position:fixed;inset:0;display:none;align-items:center;justify-content:center;
     background:var(--bg-deep);z-index:100;padding:20px;
@@ -334,6 +347,13 @@
   .login-card{width:100%;max-width:360px;background:var(--bg-panel);border:1px solid var(--line);border-radius:var(--radius);padding:26px 22px;}
   .login-title{font-family:'Fraunces',serif;font-weight:600;font-size:20px;text-align:center;margin:4px 0 20px;}
   .login-error{color:var(--red);font-size:13px;min-height:16px;margin-bottom:10px;text-align:center;}
+  .password-field{position:relative;}
+  .password-field input{padding-right:70px;}
+  .password-toggle{
+    position:absolute;right:6px;top:50%;transform:translateY(-50%);
+    background:transparent;border:none;color:var(--gold-soft);font-size:12px;font-weight:700;
+    cursor:pointer;padding:6px 8px;
+  }
   #btn-logout{width:auto;padding:6px 14px;display:none;margin-top:8px;}
 
   .app-footer{
@@ -375,7 +395,10 @@
       <label class="field-label">Email</label>
       <input type="email" id="login-email" placeholder="staff@evenement.com" autocomplete="username" required style="margin-bottom:14px;">
       <label class="field-label">Mot de passe</label>
-      <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required style="margin-bottom:14px;">
+      <div class="password-field" style="margin-bottom:14px;">
+        <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password" required>
+        <button type="button" class="password-toggle" id="login-password-toggle" aria-label="Afficher le mot de passe">Afficher</button>
+      </div>
       <div class="login-error" id="login-error"></div>
       <button type="submit" class="btn btn-gold" id="login-submit">Se connecter</button>
     </form>
@@ -1290,13 +1313,14 @@ function withTimeout(promise, ms, fallback){
   const gate = document.getElementById('login-gate');
   const logoutBtn = document.getElementById('btn-logout');
 
-  /* If Firebase never settles (some in-app browsers silently block the
-     gstatic.com imports instead of failing fast), don't leave the page
-     blank forever — show the app after a few seconds. The real security
-     boundary is the Firestore rules, not this UI gate, so failing open
-     here is safe. */
-  if(!(await withTimeout(useFirebaseAuth(), 6000, false))){
-    appRoot.style.display = '';
+  /* If Firebase never settles (module loading blocked — e.g. the page was
+     opened via file://, or some in-app browser silently blocks the
+     gstatic.com imports instead of failing fast), don't wait forever —
+     #app-root is visible by default (see CSS) precisely so this timeout
+     is a safety net, not the only thing standing between the user and a
+     blank page. The real security boundary is the Firestore rules, not
+     this UI gate, so failing open here is safe. */
+  if(!(await withTimeout(useFirebaseAuth(), 4000, false))){
     startApp();
     return;
   }
@@ -1321,6 +1345,15 @@ function withTimeout(promise, ms, fallback){
   });
 })();
 
+document.getElementById('login-password-toggle').addEventListener('click', ()=>{
+  const input = document.getElementById('login-password');
+  const btn = document.getElementById('login-password-toggle');
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  btn.textContent = show ? 'Masquer' : 'Afficher';
+  btn.setAttribute('aria-label', show ? 'Masquer le mot de passe' : 'Afficher le mot de passe');
+});
+
 document.getElementById('login-form').addEventListener('submit', async (e)=>{
   e.preventDefault();
   const email = document.getElementById('login-email').value.trim();
@@ -1336,6 +1369,7 @@ document.getElementById('login-form').addEventListener('submit', async (e)=>{
   }
   btn.disabled = false; btn.textContent = 'Se connecter';
 });
+
 document.getElementById('btn-logout').addEventListener('click', async ()=>{
   if(window.__firebaseAuth && window.__firebaseAuth.ready) await window.__firebaseAuth.signOut();
 });
