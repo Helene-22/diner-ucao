@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Contrôle d'accès — Carte de Dîner</title>
+<title>Contrôle d'accès — Carte de Dîner UCAO ISAE</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -494,6 +494,12 @@
           <button class="btn btn-ghost" id="btn-download-qr">Télécharger le QR</button>
         </div>
       </div>
+    </div>
+
+    <div class="card">
+      <h3>Cartes payées</h3>
+      <div class="muted">Cartes déjà encaissées. Vous pouvez annuler un paiement par erreur directement ici.</div>
+      <div id="paid-cards-list" style="margin-top:10px;"><div class="muted">Chargement…</div></div>
     </div>
 
     <div class="card">
@@ -1207,6 +1213,43 @@ async function refreshCardsList(){
   el.innerHTML = '<div class="muted">Chargement…</div>';
   allCardsCache = await listAllCards();
   renderCardsList(allCardsCache);
+  renderPaidCardsList(allCardsCache);
+}
+function renderPaidCardsList(cards){
+  const el = document.getElementById('paid-cards-list');
+  if(!el) return;
+  const paid = cards.filter(c => c.paye);
+  if(paid.length === 0){
+    el.innerHTML = '<div class="empty-state"><i>—</i>Aucune carte payée pour le moment.</div>';
+    return;
+  }
+  el.innerHTML = paid.map(c => {
+    const cat = c.category || categoryOf(c.code);
+    const catLabel = cat === 'VIP' ? 'VIP' : (cat === 'S' ? 'Solidarité' : '');
+    return `
+    <div class="list-item">
+      <div class="li-left">
+        <div class="li-code">${c.code}${c.nom ? ' · '+escapeHtml(c.nom) : ''}</div>
+        <div class="li-meta">${catLabel ? catLabel+' · ' : ''}${fmt(c.montant)} · encaissée ${timeFmt(c.paye_at)}${c.entree ? ' · entrée '+timeFmt(c.entree_at) : ''}</div>
+      </div>
+      <button class="btn btn-danger btn-sm" style="width:auto;flex:0 0 auto;" data-cancel-paid="${escapeHtml(c.code)}">Annuler le paiement</button>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('[data-cancel-paid]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const code = btn.dataset.cancelPaid;
+      const card = allCardsCache.find(c => c.code === code);
+      if(!card) return;
+      if(card.entree && !confirm("Cette carte a déjà servi à entrer. Annuler quand même le paiement ?")) return;
+      if(!card.entree && !confirm('Annuler le paiement de la carte ' + code + ' ?')) return;
+      card.paye = false;
+      card.paye_at = null;
+      await saveCard(card);
+      showToast('Paiement annulé — ' + code);
+      await refreshCardsList();
+      if(typeof refreshStats === 'function') refreshStats();
+    });
+  });
 }
 function renderCardsList(cards){
   const el = document.getElementById('cards-list');
